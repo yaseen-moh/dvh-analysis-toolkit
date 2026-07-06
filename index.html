@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>DVH Analysis Toolkit — Live Demo</title>
+<style>
+  body { margin:0; background:#0d1117; color:#e6e6f0; font-family: 'Segoe UI', system-ui, sans-serif; }
+  #wrap { max-width: 900px; margin:0 auto; padding:20px; }
+  h1 { font-size:1.3rem; margin-bottom:4px; }
+  p.sub { color:#9090a8; margin-top:0; font-size:0.9rem; }
+  canvas { background:#111726; border-radius:8px; display:block; margin:12px 0; }
+  .controls { display:flex; gap:16px; margin-bottom:10px; flex-wrap:wrap;}
+  label { font-size:0.8rem; color:#b0b0c8; display:flex; flex-direction:column; gap:4px;}
+  select { background:#1c2333; color:#e6e6f0; border:1px solid #3a3a5c; padding:6px 10px; border-radius:6px; }
+  #stat { font-size:0.85rem; color:#c8c8e0; margin-top:6px; }
+  #stat b { color:#7fffd4; }
+  .note { font-size:0.78rem; color:#6a6a88; margin-top:10px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>DVH Analysis Toolkit</h1>
+  <p class="sub">Compares planning-technique dose distributions across a synthetic 10-patient cohort. Pick an organ/metric to see the boxplot and live Friedman test result.</p>
+
+  <div class="controls">
+    <label>Organ
+      <select id="organSel"></select>
+    </label>
+    <label>Metric
+      <select id="metricSel">
+        <option value="Dmean_Gy">Dmean (Gy)</option>
+        <option value="Dmax_Gy">Dmax (Gy)</option>
+        <option value="V20_pct">V20 (%)</option>
+      </select>
+    </label>
+  </div>
+  <canvas id="c" width="860" height="420"></canvas>
+  <div id="stat"></div>
+  <p class="note">Data is fully synthetic (see generate_synthetic_data.py) — no real patient data. Friedman test computed live in-browser from the loaded dataset.</p>
+</div>
+
+<script>
+let DATA = [];
+
+function friedmanTest(matrix){
+  // matrix: patients x techniques
+  const n = matrix.length, k = matrix[0].length;
+  const ranks = matrix.map(row=>{
+    const idx = row.map((v,i)=>i).sort((a,b)=>row[a]-row[b]);
+    const r = new Array(k);
+    idx.forEach((origIdx, rank)=>{ r[origIdx] = rank+1; });
+    return r;
+  });
+  const rankSums = new Array(k).fill(0);
+  ranks.forEach(row=>row.forEach((r,i)=>rankSums[i]+=r));
+  const stat = (12/(n*k*(k+1))) * rankSums.reduce((s,r)=>s+r*r,0) - 3*n*(k+1);
+  return { stat, df: k-1 };
+}
+// chi-square upper tail p-value approx via Wilson-Hilferty
+function chisqPValue(stat, df){
+  if(stat<=0) return 1;
+  const z = (Math.pow(stat/df, 1/3) - (1-2/(9*df))) / Math.sqrt(2/(9*df));
+  return 1 - normalCDF(z);
+}
+function normalCDF(z){
+  return 0.5*(1+erf(z/Math.sqrt(2)));
+}
+function erf(x){
+  const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
+  const sign = x<0?-1:1; x=Math.abs(x);
+  const t=1/(1+p*x);
+  const y=1-(((((a5*t+a4)*t)+a3)*t+a2)*t+a1)*t*Math.exp(-x*x);
+  return sign*y;
+}
+
+function populate(){
+  const organs = [...new Set(DATA.map(d=>d.Organ))].sort();
+  const sel = document.getElementById('organSel');
+  sel.innerHTML = organs.map(o=>`<option value="${o}">${o}</option>`).join('');
+  sel.value = 'L_Parotid';
+}
+
+function getMatrix(organ, metric){
+  const rows = DATA.filter(d=>d.Organ===organ);
+  const patients = [...new Set(rows.map(r=>r.PatientID))].sort();
+  const techniques = [...new Set(rows.map(r=>r.Technique))].sort();
+  const matrix = patients.map(p=>
+    techniques.map(t=>{
+      const rec = rows.find(r=>r.PatientID===p && r.Technique===t);
+      return rec[metric];
+    })
+  );
+  return { matrix, techniques };
+}
+
+function draw(organ, metric){
+  const { matrix, techniques } = getMatrix(organ, metric);
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const W=canvas.width, H=canvas.height;
+  ctx.fillStyle='#111726'; ctx.fillRect(0,0,W,H);
+
+  const allVals = matrix.flat();
+  const minV = Math.min(...allVals)*0.9;
+  const maxV = Math.max(...allVals)*1.1;
+  const pad=50;
+  const colW = (W-2*pad)/techniques.length;
+  const sy = (H-2*pad)/(maxV-minV);
+  function toY(v){ return H-pad-(v-minV)*sy; }
+
+  const colors = ['#7fffd4','#5aa9ff','#feca57','#ff7a59','#c98bff'];
+
+  techniques.forEach((tech, ti)=>{
+    const vals = matrix.map(row=>row[ti]).sort((a,b)=>a-b);
+    const q1 = vals[Math.floor(vals.length*0.25)];
+    const med = vals[Math.floor(vals.length*0.5)];
+    const q3 = vals[Math.floor(vals.length*0.75)];
+    const min = vals[0], max = vals[vals.length-1];
+    const cx = pad + colW*ti + colW/2;
+    const boxW = colW*0.5;
+    const color = colors[ti % colors.length];
+
+    // whiskers
+    ctx.strokeStyle = color; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(cx, toY(min)); ctx.lineTo(cx, toY(q1)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, toY(q3)); ctx.lineTo(cx, toY(max)); ctx.stroke();
+
+    // box
+    ctx.strokeRect(cx-boxW/2, toY(q3), boxW, toY(q1)-toY(q3));
+
+    // median
+    ctx.beginPath();
+    ctx.moveTo(cx-boxW/2, toY(med)); ctx.lineTo(cx+boxW/2, toY(med));
+    ctx.lineWidth=2; ctx.stroke();
+
+    // points (patient dots, jittered)
+    matrix.forEach(row=>{
+      const jitter = (Math.random()-0.5)*boxW*0.6;
+      ctx.beginPath();
+      ctx.arc(cx+jitter, toY(row[ti]), 2.5, 0, Math.PI*2);
+      ctx.fillStyle = color+'aa';
+      ctx.fill();
+    });
+
+    // label
+    ctx.fillStyle='#c8c8e0'; ctx.font='12px sans-serif'; ctx.textAlign='center';
+    ctx.fillText(tech, cx, H-pad+18);
+  });
+  ctx.textAlign='left';
+
+  // axis
+  ctx.strokeStyle='#333a4a';
+  ctx.beginPath(); ctx.moveTo(pad,pad); ctx.lineTo(pad,H-pad); ctx.lineTo(W-pad,H-pad); ctx.stroke();
+
+  const { stat, df } = friedmanTest(matrix);
+  const p = chisqPValue(stat, df);
+  document.getElementById('stat').innerHTML =
+    `Friedman χ² = <b>${stat.toFixed(2)}</b>, df=${df}, p ≈ <b>${p.toFixed(4)}</b> ` +
+    (p<0.05 ? ' → statistically significant technique effect' : ' → no significant technique effect detected');
+}
+
+fetch('demo_data.json').then(r=>r.json()).then(data=>{
+  DATA = data;
+  populate();
+  const organSel = document.getElementById('organSel');
+  const metricSel = document.getElementById('metricSel');
+  const update = ()=>draw(organSel.value, metricSel.value);
+  organSel.addEventListener('change', update);
+  metricSel.addEventListener('change', update);
+  update();
+});
+</script>
+</body>
+</html>
