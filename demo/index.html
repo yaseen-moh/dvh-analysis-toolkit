@@ -116,10 +116,21 @@ function chisqPValue(stat, df){
   return 1 - normalCDF(z);
 }
 
+// ---------------------------------------------------------------
+// FIX: numericColumns() used to check ONLY DATA[0] to decide which
+// columns count as numeric metrics. If the metric happened to be
+// blank/NaN for whichever row landed first in the file (e.g. an
+// organ that doesn't have a Dmean value), that entire column was
+// silently dropped from the dropdown — even though it had valid
+// numeric values in every other row.
+//
+// Fixed version: a column counts as numeric if ANY row has a real
+// number in it, not just the first row.
+// ---------------------------------------------------------------
 function numericColumns(){
   if(!DATA.length) return [];
-  return Object.keys(DATA[0]).filter(k => k!=='PatientID' && k!=='Organ' && k!=='Technique'
-    && typeof DATA[0][k] === 'number');
+  const keys = Object.keys(DATA[0]).filter(k => k!=='PatientID' && k!=='Organ' && k!=='Technique');
+  return keys.filter(k => DATA.some(row => typeof row[k] === 'number' && !isNaN(row[k])));
 }
 
 function populate(){
@@ -159,7 +170,10 @@ function getMatrix(organ, metric){
       const rec = rows.find(r=>r.PatientID===p && r.Technique===t);
       return rec ? rec[metric] : null;
     });
-    if(vals.every(v=>v!==null && v!==undefined)){
+    // FIX: also reject NaN values (blank cells for organs that don't
+    // have this metric), not just null/undefined, so partially-empty
+    // metric columns don't crash the matrix build.
+    if(vals.every(v=>v!==null && v!==undefined && !(typeof v === 'number' && isNaN(v)))){
       matrix.push(vals);
       keptPatients.push(p);
     }
@@ -286,8 +300,18 @@ function parseCSV(text){
     headers.forEach((h,i)=>{
       const raw = cells[i];
       const num = parseFloat(raw);
-      row[h] = (h==='PatientID' || h==='Organ' || h==='Technique') ? raw
-                : (isNaN(num) ? raw : num);
+      // FIX: an empty cell used to fall through to `raw` (empty string),
+      // which meant a blank numeric field became a non-numeric value in
+      // that row and broke numericColumns()'s type check for that row.
+      // Blank cells are now explicitly stored as NaN so they're
+      // recognizable as "missing number" rather than "text".
+      if(h==='PatientID' || h==='Organ' || h==='Technique'){
+        row[h] = raw;
+      } else if(raw === '' || raw === undefined){
+        row[h] = NaN;
+      } else {
+        row[h] = isNaN(num) ? raw : num;
+      }
     });
     return row;
   });
